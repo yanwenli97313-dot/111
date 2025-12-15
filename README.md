@@ -1,1 +1,326 @@
-# 111
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>手势控制的 3D 圣诞树</title>
+    <style>
+        /* CSS 样式 */
+        body { margin: 0; overflow: hidden; background-color: #1a001a; /* 深紫色背景 */ }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #fff; font-size: 24px; text-shadow: 0 0 10px #fff;
+            transition: opacity 0.5s;
+        }
+        /* 隐藏 MediaPipe 内部的视频元素，只显示 3D 渲染 */
+        video { display: none; } 
+    </style>
+    
+    <script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div id="loading">正在加载 3D 场景并启动摄像头...</div>
+
+    <script type="module">
+        // 导入 Three.js 模块
+        import * as THREE from 'https://unpkg.com/three@0.146.0/build/three.module.js';
+
+        // --- 全局变量 ---
+        let scene, camera, renderer, christmasTreeGroup;
+        let ambientLight, pointLight;
+
+        // 【手势交互变量】
+        let handXNormalized = 0.5; // 归一化手部X坐标 (0到1)
+        let handSizeNormalized = 0.1; // 归一化手部尺寸 (用于缩放)
+        let isHandPresent = false;
+        let isLightsOn = true; 
+        const christmasLights = []; // 存储所有彩灯 Mesh 引用
+
+        // --- 初始化 Three.js 场景 ---
+        function init() {
+            // 场景和雾效
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x1a001a, 0.05); 
+
+            // 摄像机
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 10, 20); 
+            camera.lookAt(0, 5, 0); 
+
+            // 渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.shadowMap.enabled = true; 
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap; 
+            document.body.appendChild(renderer.domElement);
+
+            // 光源
+            ambientLight = new THREE.AmbientLight(0x404040, 0.5); 
+            scene.add(ambientLight);
+
+            pointLight = new THREE.PointLight(0xffffff, 1, 100); 
+            pointLight.position.set(0, 25, 10); 
+            pointLight.castShadow = true; 
+            pointLight.shadow.mapSize.width = 1024;
+            pointLight.shadow.mapSize.height = 1024;
+            pointLight.shadow.camera.near = 0.5;
+            pointLight.shadow.camera.far = 50;
+            scene.add(pointLight);
+
+            // 创建圣诞树
+            christmasTreeGroup = createChristmasTree();
+            scene.add(christmasTreeGroup);
+
+            // 窗口调整大小事件
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        // --- 创建圣诞树模型 ---
+        function createChristmasTree() {
+            const treeGroup = new THREE.Group();
+            const coneHeight = 5;
+            const numSegments = 4;
+            
+            // 1. 树干
+            const trunkGeometry = new THREE.CylinderGeometry(0.8, 1.2, 5, 8); 
+            const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 }); 
+            const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunk.position.y = 2.5; 
+            trunk.castShadow = true; 
+            trunk.receiveShadow = true; 
+            treeGroup.add(trunk);
+
+            // 2. 树冠
+            const coneMaterial = new THREE.MeshStandardMaterial({ color: 0x006400, flatShading: false }); 
+            for (let i = 0; i < numSegments; i++) {
+                const coneRadiusTop = (numSegments - i) * 1.5; 
+                const coneRadiusBottom = (numSegments - i + 1) * 1.5; 
+                
+                const coneGeometry = new THREE.ConeGeometry(coneRadiusTop, coneHeight, 16);
+                const cone = new THREE.Mesh(coneGeometry, coneMaterial);
+                cone.position.y = coneHeight * 0.7 + i * (coneHeight * 0.8) + 5; 
+                cone.castShadow = true;
+                cone.receiveShadow = true;
+                treeGroup.add(cone);
+            }
+
+            // 3. 圣诞星 (发光球体)
+            const starGeometry = new THREE.SphereGeometry(1.2, 16, 16); 
+            const starMaterial = new THREE.MeshStandardMaterial({
+                color: 0xFFA500, 
+                emissive: 0xFFA500, 
+                emissiveIntensity: 1.5 
+            });
+            const star = new THREE.Mesh(starGeometry, starMaterial);
+            star.position.y = 5 + coneHeight * numSegments * 0.8 + 1; 
+            star.castShadow = true;
+            treeGroup.add(star);
+
+            // 4. 圣诞彩灯 (存储引用到 christmasLights 数组)
+            const lightColors = [0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff]; 
+            const numLights = 80;
+            const lightRadius = 0.2;
+            const lightGeometry = new THREE.SphereGeometry(lightRadius, 8, 8);
+            const maxTreeRadius = coneHeight * numSegments * 0.8;
+
+            for (let i = 0; i < numLights; i++) {
+                const color = lightColors[Math.floor(Math.random() * lightColors.length)];
+                const lightMaterial = new THREE.MeshStandardMaterial({
+                    color: color,
+                    emissive: color, 
+                    emissiveIntensity: 0.8 
+                });
+                const light = new THREE.Mesh(lightGeometry, lightMaterial);
+
+                // 随机位置在树冠范围内
+                let x, y, z;
+                do {
+                    x = (Math.random() - 0.5) * (coneRadiusBottom * 2.5);
+                    y = (Math.random() * (maxTreeRadius)) + 5;
+                    z = (Math.random() - 0.5) * (coneRadiusBottom * 2.5);
+                } while (new THREE.Vector3(x, y, z).distanceTo(new THREE.Vector3(0, y, 0)) > (coneRadiusBottom * 0.8 - (y - 5) / (maxTreeRadius) * (coneRadiusBottom * 0.8)) || y < 5.5);
+
+                light.position.set(x, y, z);
+                christmasLights.push(light); 
+                treeGroup.add(light);
+            }
+
+            // 5. 雪花粒子
+            const snowGeometry = new THREE.BufferGeometry();
+            const snowCount = 1000;
+            const snowPositions = new Float32Array(snowCount * 3);
+            for (let i = 0; i < snowCount; i++) {
+                snowPositions[i * 3] = (Math.random() - 0.5) * 50;
+                snowPositions[i * 3 + 1] = (Math.random() - 0.5) * 50 + 20; 
+                snowPositions[i * 3 + 2] = (Math.random() - 0.5) * 50;
+            }
+            snowGeometry.setAttribute('position', new THREE.BufferAttribute(snowPositions, 3));
+            const snowMaterial = new THREE.PointsMaterial({
+                color: 0xFFFFFF,
+                size: 0.2,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending
+            });
+            const snow = new THREE.Points(snowGeometry, snowMaterial);
+            scene.add(snow);
+
+
+            return treeGroup;
+        }
+
+        // --- 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. 手势控制旋转和缩放
+            if (isHandPresent) {
+                // 旋转控制：将 0 到 1 的 handXNormalized 映射到目标旋转角度
+                const targetRotationY = (handXNormalized - 0.5) * Math.PI * 1.5;
+                christmasTreeGroup.rotation.y = THREE.MathUtils.lerp(
+                    christmasTreeGroup.rotation.y,
+                    targetRotationY,
+                    0.05
+                );
+
+                // 缩放控制：将手部尺寸映射到缩放范围 (0.8 到 2.0)
+                const targetScale = THREE.MathUtils.mapLinear(handSizeNormalized, 0.05, 0.4, 0.8, 2.0);
+                christmasTreeGroup.scale.setScalar(THREE.MathUtils.lerp(
+                    christmasTreeGroup.scale.x,
+                    targetScale,
+                    0.05
+                ));
+            } else {
+                // 无手时恢复慢速自动旋转和默认大小
+                christmasTreeGroup.rotation.y += 0.005;
+                christmasTreeGroup.scale.setScalar(THREE.MathUtils.lerp(
+                    christmasTreeGroup.scale.x,
+                    1.0,
+                    0.05
+                ));
+            }
+
+            // 2. 雪花飘落
+            const snowPositions = scene.children.find(obj => obj.isPoints)?.geometry.attributes.position.array;
+            if (snowPositions) {
+                for (let i = 0; i < snowPositions.length; i += 3) {
+                    snowPositions[i + 1] -= 0.05; 
+                    if (snowPositions[i + 1] < -10) { 
+                        snowPositions[i + 1] = 40;
+                    }
+                    snowPositions[i] += Math.sin(snowPositions[i+1] * 0.1) * 0.01;
+                    snowPositions[i+2] += Math.cos(snowPositions[i+1] * 0.1) * 0.01;
+                }
+                scene.children.find(obj => obj.isPoints).geometry.attributes.position.needsUpdate = true;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 窗口大小调整 ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- 手势识别和 MediaPipe 集成 ---
+
+        // 辅助函数：计算两点间距离 (用于手势识别)
+        function calculateDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        // 手势：判断是否握拳
+        function detectFist(landmarks) {
+            // 
+            const wrist = landmarks[0];
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+            const indexPip = landmarks[6]; // 食指近端指间关节
+            
+            // 握拳判断：指尖到手腕的距离明显小于关节到手腕的距离
+            const isIndexCurled = calculateDistance(indexTip, wrist) < calculateDistance(indexPip, wrist) * 0.8;
+            const isMiddleCurled = calculateDistance(middleTip, wrist) < calculateDistance(indexPip, wrist) * 0.8;
+
+            return isIndexCurled && isMiddleCurled; 
+        }
+
+        // 彩灯开关函数
+        function toggleLights(on) {
+            if (isLightsOn === on) return;
+            isLightsOn = on;
+
+            const emissiveIntensity = on ? 0.8 : 0.0;
+            
+            christmasLights.forEach(light => {
+                light.material.emissiveIntensity = emissiveIntensity;
+                light.material.needsUpdate = true;
+            });
+            console.log(`彩灯状态: ${on ? '开' : '关'}`);
+        }
+
+
+        // MediaPipe 结果处理函数
+        function onResults(results) {
+            document.getElementById('loading').style.opacity = 0;
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                isHandPresent = true;
+                const landmarks = results.multiHandLandmarks[0];
+
+                const wrist = landmarks[0];
+                const indexTip = landmarks[8];
+
+                // 1. 旋转控制：获取手掌X轴位置 (归一化到 0-1)
+                handXNormalized = landmarks[9].x; // 中指根部X坐标
+
+                // 2. 缩放控制：计算手掌尺寸 (手腕到食指尖的距离)
+                const size = calculateDistance(wrist, indexTip);
+                handSizeNormalized = size;
+
+                // 3. 彩灯开关：检测握拳
+                const isFist = detectFist(landmarks);
+                toggleLights(!isFist); // 握拳 -> 关灯；张手 -> 开灯
+
+            } else {
+                isHandPresent = false;
+                handXNormalized = 0.5; // 复位到中心
+            }
+        }
+
+        // MediaPipe 启动配置
+        const videoElement = document.createElement('video');
+        const hands = new Hands({locateFile: (file) => {
+            return `https://unpkg.com/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        
+        // 启动摄像头
+        cameraUtils.start();
+        
+        // 确保 Three.js 在 MediaPipe 之前初始化
+        init();
+    </script>
+</body>
+</html>
